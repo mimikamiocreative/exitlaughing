@@ -6,134 +6,162 @@
 <title>Exit Laughing – Scroll to Open</title>
 <style>
   html,body{margin:0;height:100%;background:transparent;overflow:hidden}
-  #book{width:100%;height:100%;display:block;touch-action:pan-x;cursor:pointer;
+  #stage{position:relative;width:100%;height:100%;cursor:pointer;touch-action:pan-x;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  #stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #stage video{object-fit:contain;opacity:0;transition:opacity .4s}
+  #stage video.ready{opacity:1}
 </style>
 </head>
 <body>
-<canvas id="book" aria-label="A vintage book that opens as you scroll"></canvas>
+<div id="stage" aria-label="A vintage book that opens as you scroll">
+  <video id="clip" muted playsinline preload="auto" disablepictureinpicture></video>
+  <canvas id="frames"></canvas>
+</div>
 
 <script>
 (() => {
   /* ============ EASY KNOBS ============ */
 
-  /* 1. Where the frames live (your GitHub folder, via jsDelivr).        */
-  const BASE = 'https://cdn.jsdelivr.net/gh/mimikamiocreative/exitlaughing@main/scroll-book/frames/';
+  /* 1. Where the files live (your GitHub folder, via jsDelivr).          */
+  const BASE = 'https://cdn.jsdelivr.net/gh/mimikamiocreative/exitlaughing@main/scroll-book/';
+  const CLIP = BASE + 'book-open.webm';      // the see-through video
+  const FRAMES_DIR = BASE + 'frames/';       // backup frames for Safari / iPhone
 
   /* 2. How much scrolling it takes to open the book fully.
-        Bigger number = slower, more luxurious opening.                 */
+        Bigger number = slower, more luxurious opening.                   */
   const SCROLL_LENGTH = 1400;   // pixels of scrolling
 
-  /* 3. Smoothness. 0.08 = dreamy and floaty, 0.25 = snappy.           */
+  /* 3. Smoothness. 0.08 = dreamy and floaty, 0.25 = snappy.             */
   const SMOOTHING = 0.12;
 
-  /* 4. Click/tap the book to open (or close) it on its own too.       */
+  /* 4. Click/tap the book to open (or close) it on its own too.         */
   const CLICK_TO_OPEN = true;
   const CLICK_SECONDS = 2.2;    // how long that automatic opening takes
 
   /* ---- don't need to touch below here ---- */
-  const FRAMES = 121, FW = 1696, FH = 1220;
-  const name = i => BASE + 'book-' + String(i + 1).padStart(3, '0') + '.webp';
-
-  const canvas = document.getElementById('book');
-  const ctx = canvas.getContext('2d');
-  // load a rough pass first (every 8th frame), then fill in the rest
-  const imgs = new Array(FRAMES).fill(null);
-  const order = [];
-  for (const step of [8, 4, 2, 1]) for (let i = 0; i < FRAMES; i += step) if (!order.includes(i)) order.push(i);
-  if (!order.includes(FRAMES - 1)) order.splice(1, 0, FRAMES - 1);
-  let next = 0;
-  function loadMore(){
-    if (next >= order.length) return;
-    const i = order[next++], im = new Image();
-    im.decoding = 'async';
-    im.onload = () => { imgs[i] = im; needsDraw = true; loadMore(); };
-    im.onerror = () => loadMore();
-    im.src = name(i);
-  }
-  for (let k = 0; k < 6; k++) loadMore();   // 6 downloads at a time
-
-  let target = 0, shown = 0, needsDraw = true, lastFrame = -1, autoplay = null;
+  const stage = document.getElementById('stage');
+  const video = document.getElementById('clip');
+  const canvas = document.getElementById('frames');
   const clamp = v => Math.max(0, Math.min(1, v));
 
-  /* ---------- sizing (sharp on retina, book always fully visible) ---------- */
-  let box = {x:0, y:0, w:1, h:1};
-  function resize(){
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
-    const s = Math.min(canvas.width / FW, canvas.height / FH);
-    box = {w: FW * s, h: FH * s, x: (canvas.width - FW * s) / 2, y: (canvas.height - FH * s) / 2};
-    needsDraw = true;
-  }
-  window.addEventListener('resize', resize);
-  resize();
+  // Safari and every iPhone/iPad browser can't show see-through video,
+  // so they get the frame-by-frame version instead.
+  const ua = navigator.userAgent;
+  const webkitOnly = /iPhone|iPad|iPod/.test(ua) ||
+    (/Safari/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR|Android/.test(ua)) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const useVideo = !webkitOnly && video.canPlayType('video/webm; codecs="vp9"') !== '';
 
-  /* ---------- draw one frame ---------- */
-  function draw(p){
-    const want = Math.round(p * (FRAMES - 1));
-    // if that exact frame hasn't arrived yet, use the closest one that has
-    let g = -1;
-    for (let d = 0; d < FRAMES; d++){
-      if (imgs[want - d]) { g = want - d; break; }
-      if (imgs[want + d]) { g = want + d; break; }
-    }
-    if (g < 0) return;
-    if (g === lastFrame && !needsDraw) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(imgs[g], box.x, box.y, box.w, box.h);
-    lastFrame = g; needsDraw = false;
+  let show;   // show(progress 0..1)
+
+  if (useVideo) {
+    canvas.remove();
+    // download the whole clip first so scrubbing is instant
+    fetch(CLIP).then(r => r.blob()).then(b => { video.src = URL.createObjectURL(b); })
+      .catch(() => { video.src = CLIP; });
+    let busy = false, pending = null;
+    const seek = t => {
+      if (busy) { pending = t; return; }
+      busy = true; video.currentTime = t;
+    };
+    video.addEventListener('seeked', () => {
+      busy = false;
+      video.classList.add('ready');
+      if (pending !== null) { const t = pending; pending = null; seek(t); }
+    });
+    video.addEventListener('loadeddata', () => { video.pause(); seek(0.001); });
+    let lastT = -1;
+    show = p => {
+      if (!video.duration) return;
+      const t = Math.min(video.duration - 0.02, p * video.duration) + 0.001;
+      if (Math.abs(t - lastT) > 0.004) { lastT = t; seek(t); }
+    };
+  } else {
+    video.remove();
+    const FRAMES = 121, FW = 1696, FH = 1220;
+    const ctx = canvas.getContext('2d');
+    const name = i => FRAMES_DIR + 'book-' + String(i + 1).padStart(3, '0') + '.webp';
+    const imgs = new Array(FRAMES).fill(null);
+    const order = [];
+    for (const step of [8, 4, 2, 1]) for (let i = 0; i < FRAMES; i += step) if (!order.includes(i)) order.push(i);
+    if (!order.includes(FRAMES - 1)) order.splice(1, 0, FRAMES - 1);
+    let next = 0, needsDraw = true, lastFrame = -1;
+    const loadMore = () => {
+      if (next >= order.length) return;
+      const i = order[next++], im = new Image();
+      im.decoding = 'async';
+      im.onload = () => { imgs[i] = im; needsDraw = true; loadMore(); };
+      im.onerror = () => loadMore();
+      im.src = name(i);
+    };
+    for (let k = 0; k < 6; k++) loadMore();
+    let box = {x:0, y:0, w:1, h:1};
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 3);
+      canvas.width = Math.round(canvas.clientWidth * dpr);
+      canvas.height = Math.round(canvas.clientHeight * dpr);
+      const s = Math.min(canvas.width / FW, canvas.height / FH);
+      box = {w: FW * s, h: FH * s, x: (canvas.width - FW * s) / 2, y: (canvas.height - FH * s) / 2};
+      needsDraw = true;
+    };
+    window.addEventListener('resize', resize); resize();
+    show = p => {
+      const want = Math.round(p * (FRAMES - 1));
+      let g = -1;
+      for (let d = 0; d < FRAMES; d++) {
+        if (imgs[want - d]) { g = want - d; break; }
+        if (imgs[want + d]) { g = want + d; break; }
+      }
+      if (g < 0 || (g === lastFrame && !needsDraw)) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(imgs[g], box.x, box.y, box.w, box.h);
+      lastFrame = g; needsDraw = false;
+    };
   }
 
+  /* ---------- animation loop ---------- */
+  let target = 0, shown = 0, autoplay = null;
   function loop(now){
     if (autoplay){
       const k = clamp((now - autoplay.start) / (CLICK_SECONDS * 1000));
-      const e = k < .5 ? 4*k*k*k : 1 - Math.pow(-2*k + 2, 3) / 2;   // ease in-out
-      target = autoplay.from + (autoplay.to - autoplay.from) * e;
+      const e = k < .5 ? 4*k*k*k : 1 - Math.pow(-2*k + 2, 3) / 2;
+      target = shown = autoplay.from + (autoplay.to - autoplay.from) * e;
       if (k >= 1) autoplay = null;
-      shown = target;
     } else {
       shown += (target - shown) * SMOOTHING;
       if (Math.abs(target - shown) < 0.0005) shown = target;
     }
-    draw(shown);
+    show(shown);
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
 
   /* ---------- scroll control ----------
-     A) If the code sits directly on the page, it follows the page scroll.
-     B) If Readymag puts it in its own little frame (usual), scrolling over
-        the book opens it first; once it's fully open the page carries on
-        scrolling as normal. Scrolling back up closes it again.            */
+     Scrolling over the book opens it first; once it's fully open the page
+     carries on scrolling as normal. Scrolling back up closes it again.   */
   let pageWin = null, host = null;
   try {
-    if (window.self === window.top) { pageWin = window; host = canvas; }
+    if (window.self === window.top) { pageWin = window; host = stage; }
     else if (window.frameElement) { pageWin = window.parent; host = window.frameElement; }
   } catch (e) { pageWin = null; }
 
   if (pageWin && pageWin !== window){
-    // same-origin frame: follow the real page scroll
     const update = () => {
       const r = host.getBoundingClientRect(), vh = pageWin.innerHeight;
-      // starts opening when the book is fully on screen, finishes SCROLL_LENGTH later
-      const start = vh - r.height, travelled = start - r.top;
+      const travelled = (vh - r.height) - r.top;
       if (!autoplay) target = clamp(travelled / SCROLL_LENGTH);
     };
     pageWin.addEventListener('scroll', update, {passive:true, capture:true});
     update();
   } else {
-    // own frame: turn wheel / swipe over the book into opening
     const nudge = (dy, ev) => {
-      const opening = dy > 0, closing = dy < 0;
-      if ((opening && target < 1) || (closing && target > 0)){
-        if (ev.cancelable) ev.preventDefault();   // hold the page still while the book moves
+      if ((dy > 0 && target < 1) || (dy < 0 && target > 0)){
+        if (ev.cancelable) ev.preventDefault();
         autoplay = null;
         target = clamp(target + dy / SCROLL_LENGTH);
       }
-      // otherwise do nothing, so the page scrolls on as normal
     };
     window.addEventListener('wheel', ev => {
       const unit = ev.deltaMode === 1 ? 40 : ev.deltaMode === 2 ? 800 : 1;
@@ -154,12 +182,11 @@
   }
 
   if (CLICK_TO_OPEN){
-    canvas.addEventListener('click', () => {
+    stage.addEventListener('click', () => {
       autoplay = {start: performance.now(), from: shown, to: shown > 0.5 ? 0 : 1};
     });
   }
 
-  // for previews: ?p=0.5 shows the book half open
   const q = /[?&]p=([\d.]+)/.exec(location.search);
   if (q) target = shown = clamp(+q[1]);
 })();
