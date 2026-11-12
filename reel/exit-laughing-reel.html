@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Exit Laughing – Reel Gallery</title>
-<!-- VERSION 2: your 14 photos (if you can read this line in Readymag, you have the newest code) -->
+<!-- VERSION 3: mouse fixed, no blue box (if you can read this line in Readymag, you have the newest code) -->
 <style>
   html,body{margin:0;height:100%;background:transparent;overflow:hidden}
   #stage{position:relative;width:100%;height:100%;overflow:hidden;background:#140d08;
@@ -15,11 +15,12 @@
   #shade{background:#000;opacity:0;pointer-events:none}
   #grain{pointer-events:none;mix-blend-mode:overlay}
   #vignette{pointer-events:none;background:radial-gradient(ellipse at 50% 48%,rgba(0,0,0,0) 55%,rgba(20,10,4,.55) 100%)}
+  #stage *,#stage *:focus,#stage:focus{outline:none}
   #reelWrap{position:absolute;left:0;top:0;width:740px;height:740px;transform-origin:0 0;touch-action:none;cursor:grab}
   #reelWrap.dragging{cursor:grabbing}
   #reelWrap.overWin{cursor:pointer}
   #reel{position:absolute;inset:0;transform-origin:370px 370px;will-change:transform}
-  .win{position:absolute;left:0;top:0;width:102px;height:110px;margin:-55px 0 0 -51px;
+  .win{cursor:pointer;position:absolute;left:0;top:0;width:102px;height:110px;margin:-55px 0 0 -51px;
     background:#2a1d14 center/cover no-repeat;transform-origin:51px 55px}
   #disc{position:absolute;inset:0;width:740px;height:740px;pointer-events:none;
     filter:drop-shadow(0 0 2.5px rgba(40,22,8,.55))}
@@ -238,27 +239,32 @@
   }
   const step = d => select(sel + d);
 
+  // measure the reel where it really is on screen (Readymag may scale or zoom the page)
+  const geo = () => { const r = wrap.getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2, s: r.width / 740 || 1}; };
+  const polar = (cx, cy) => { const g = geo(), dx = (cx - g.x) / g.s, dy = (cy - g.y) / g.s;
+    return {r: Math.hypot(dx, dy), a: Math.atan2(dx, -dy) * 180 / Math.PI}; };
   // which window is under the pointer (or -1)
-  function winAt(cx, cy){
-    const b = stage.getBoundingClientRect(), dx = (cx - b.left - CX) / S, dy = (cy - b.top - CY) / S;
-    const r = Math.hypot(dx, dy); if (r < 205 || r > 325) return -1;
-    const a = Math.atan2(dx, -dy) * 180 / Math.PI - R;
-    const k = Math.round(wrapDeg(a - FIRST) / STEP);
-    const off = Math.abs(wrapDeg(a - theta(k)));
-    return off < 11 ? ((k % NWIN) + NWIN) % NWIN : -1;
+  function winAt(cx, cy, target){
+    const w = target && target.closest && target.closest('.win');
+    if (w) return wins.indexOf(w);
+    const p = polar(cx, cy); if (p.r < 205 || p.r > 325) return -1;
+    const a = p.a - R, k = Math.round(wrapDeg(a - FIRST) / STEP);
+    return Math.abs(wrapDeg(a - theta(k))) < 12 ? ((k % NWIN) + NWIN) % NWIN : -1;
   }
-  const onDisc = (cx, cy) => { const b = stage.getBoundingClientRect(); return Math.hypot((cx - b.left - CX) / S, (cy - b.top - CY) / S) < 368; };
-  const angAt = (cx, cy) => { const b = stage.getBoundingClientRect(); return Math.atan2(cx - b.left - CX, -(cy - b.top - CY)) * 180 / Math.PI; };
+  const onDisc = (cx, cy) => polar(cx, cy).r < 368;
+  const angAt = (cx, cy) => polar(cx, cy).a;
 
-  let down = null;
+  let down = null, justDragged = false;
   stage.addEventListener('pointerdown', ev => {
     if (!onDisc(ev.clientX, ev.clientY)) return;
-    down = {x: ev.clientX, y: ev.clientY, a: angAt(ev.clientX, ev.clientY), R, t: performance.now(), moved: false, w: 0};
-    try { stage.setPointerCapture(ev.pointerId); } catch (e) {}
+    down = {x: ev.clientX, y: ev.clientY, a: angAt(ev.clientX, ev.clientY), R, t: performance.now(), moved: false, w: 0, id: ev.pointerId};
   });
   stage.addEventListener('pointermove', ev => {
     if (down){
-      if (!down.moved && Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 6){ down.moved = true; dragging = true; wrap.classList.add('dragging'); }
+      if (!down.moved && Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 8){
+        down.moved = true; dragging = true; wrap.classList.add('dragging');
+        try { stage.setPointerCapture(down.id); } catch (e) {}
+      }
       if (down.moved){
         const a = angAt(ev.clientX, ev.clientY), now = performance.now();
         const nr = down.R + wrapDeg(a - down.a), dt = Math.max(8, now - down.t) / 1000;
@@ -266,22 +272,26 @@
       }
       return;
     }
-    hover = winAt(ev.clientX, ev.clientY);
+    hover = winAt(ev.clientX, ev.clientY, ev.target);
     wrap.classList.toggle('overWin', hover >= 0);
   });
   const release = ev => {
     if (!down) return;
-    if (!down.moved){ const k = winAt(ev.clientX, ev.clientY); if (k >= 0) select(k); }
-    else {
+    if (down.moved){
       // let it coast a little, then click into the nearest window
       const end = R + Math.max(-400, Math.min(400, down.w)) * .3;
       const k = Math.round(wrapDeg(-end - FIRST) / STEP);
-      V = down.w * .5; select(k);
+      V = down.w * .5; select(k); justDragged = true; setTimeout(() => justDragged = false, 50);
     }
     down = null; dragging = false; wrap.classList.remove('dragging');
   };
   stage.addEventListener('pointerup', release); stage.addEventListener('pointercancel', release);
   stage.addEventListener('pointerleave', () => { if (!down){ hover = -1; wrap.classList.remove('overWin'); } });
+  // a plain click on a window picks it
+  stage.addEventListener('click', ev => {
+    if (justDragged) return;
+    const k = winAt(ev.clientX, ev.clientY, ev.target); if (k >= 0) select(k);
+  });
 
   let wheelAcc = 0, wheelT = 0;
   if (SCROLL_TURNS) stage.addEventListener('wheel', ev => {
